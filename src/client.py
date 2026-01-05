@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from bleak import BleakClient, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
 from dotenv import load_dotenv
 
 # Setup logging
@@ -28,6 +29,13 @@ class RoroshettaSenseClient:
     CHAR_MODEL_NAME = "00002a24-0000-1000-8000-00805f9b34fb"
     # Handle 15: Standard Bluetooth Manufacturer Name
     CHAR_MANUFACTURER = "00002a29-0000-1000-8000-00805f9b34fb"
+    # Handle 35: Command Pipe for sending control commands
+    CHAR_COMMAND_ABBA = (
+        "0000abba-1212-efde-1523-785fef13d123"  # Handle 35 (Command Pipe)
+    )
+    CHAR_COMMAND_BABE = "0000babe-1212-efde-1523-785fef13d123"
+    CHAR_ABD2 = "0000abd2-1212-efde-1523-785fef13d123"
+    CHAR_ABD3 = "0000abd3-1212-efde-1523-785fef13d123"
 
     def __init__(self, address):
         self.address = address
@@ -83,7 +91,9 @@ class RoroshettaSenseClient:
         data = await self.client.read_gatt_char(self.CHAR_SENSOR_DATA)
         return data
 
-    def notification_handler(self, characteristic, data):
+    def notification_handler(
+        self, characteristic: BleakGATTCharacteristic, data: bytearray
+    ):
         """
         Callback function that triggers every time the sensor sends new data.
         """
@@ -101,6 +111,13 @@ class RoroshettaSenseClient:
         logger.info(f"Starting live monitor on {self.CHAR_SENSOR_DATA}...")
         await self.client.start_notify(self.CHAR_SENSOR_DATA, self.notification_handler)
 
+        logger.info(f"Starting live monitor on {self.CHAR_ABD2}...")
+        await self.client.start_notify(self.CHAR_ABD2, self.notification_handler)
+        logger.info(f"Starting live monitor on {self.CHAR_COMMAND_ABBA}...")
+        await self.client.start_notify(
+            self.CHAR_COMMAND_ABBA, self.notification_handler
+        )
+
         print("Monitoring... Press Ctrl+C to stop.")
         try:
             while True:
@@ -108,9 +125,50 @@ class RoroshettaSenseClient:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             await self.client.stop_notify(self.CHAR_SENSOR_DATA)
+            await self.client.stop_notify(self.CHAR_COMMAND_ABBA)
+            await self.client.stop_notify(self.CHAR_ABD2)
             logger.info("Monitoring stopped.")
 
-    def parse_payload(self, data):
+    async def discover_uuids(self):
+        """Prints all services and characteristics with their handles."""
+        print(f"\n--- GATT Discovery for {self.address} ---")
+        for service in self.client.services:
+            print(f"\nService: {service.uuid} (Handle: {service.handle})")
+            for char in service.characteristics:
+                print(f"  Characteristic: {char.uuid}")
+                print(f"    Handle: {char.handle} (Hex: {hex(char.handle)})")
+                print(f"    Properties: {char.properties}")
+
+    async def set_light_level(self, level: int):
+        """
+        Sets light level: 0 (Off), 1 (30), 2 (60), 3 (90)
+        """
+        # Map levels to the byte values found in the Wireshark log index 4
+        intensity_map = {0: 0x00, 1: 0x1E, 2: 0x3C, 3: 0x5A}
+
+        if level not in intensity_map:
+            logger.error("Invalid level. Choose 0, 1, 2, or 3.")
+            return
+
+        intensity = intensity_map[level]
+
+        # The exact 8-byte payload structure from your logs
+        payload = bytearray([0x05, 0x20, 0x00, 0x00, intensity, 0x00, 0x00, 0x00])
+
+        logger.info(
+            f"Sending Command to {self.CHAR_COMMAND_BABE}: Level {level} ({intensity:#04x})"
+        )
+
+        # Use response=False to trigger Opcode 0x52 (Write Command)
+        await self.client.write_gatt_char(
+            self.CHAR_COMMAND_BABE, payload, response=False
+        )
+
+    #### WORK IN PROGRESS BELOW ####
+    ### When methods are confirmed working, they will be moved above ###
+    #### WORK IN PROGRESS BELOW ####
+
+    def parse_payload(self, data: bytearray):
         """
         Parses the 68-byte payload into a human-readable dictionary.
         """
@@ -133,9 +191,11 @@ class RoroshettaSenseClient:
         fan_raw = data[60]
         fan_level = fan_raw // 30
 
-        # 4. Light Status (Index 54)
-        # We found 0x5a as the 'On' signal in previous tests
-        light_on = data[54] == 0x5A
+        # Light Dimming (Index 54)
+        light_step = data[54]
+        # Actual brightness value (0-32767)
+        raw_brightness = int.from_bytes(data[55:57], byteorder="little")
+        brightness_pct = (raw_brightness / 32767) * 100
 
         # 5. System Active Flag (Index 63)
         fan_running = data[63] == 0x64
@@ -146,9 +206,43 @@ class RoroshettaSenseClient:
             "air_quality_index (VOC)": voc_raw,
             "fan_level": fan_level,
             "fan_active": fan_running,
-            "light_on": light_on,
+            "light_step_id": light_step,
+            "brightness_actual": f"{brightness_pct:.1f}%",
             "mode": "AUTO (Boost)" if fan_level == 4 else "MANUAL/IDLE",
         }
+
+    async def start_parsing_payload(self):
+        """
+        Starts monitoring and parsing the sensor payload in real-time.
+        """
+        logger.info("Starting payload parser...")
+
+        def handler(characteristic: BleakGATTCharacteristic, data: bytearray):
+            parsed = self.parse_payload(data)
+            if parsed:
+                print("\n[Parsed Sensor Data]")
+                for k, v in parsed.items():
+                    print(f"  {k}: {v}")
+            else:
+                print("Received incomplete payload.")
+
+        await self.client.start_notify(self.CHAR_SENSOR_DATA, handler)
+
+        print("Parsing... Press Ctrl+C to stop.")
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await self.client.stop_notify(self.CHAR_SENSOR_DATA)
+            logger.info("Payload parsing stopped.")
+
+    def check_light_status(
+        self, characteristic: BleakGATTCharacteristic, data: bytearray
+    ):
+        # Check index 54 for the light toggle (0x5a as seen in your logs)
+        if data[54] == 0x5A:
+            print(f"\n[!!!] SUCCESS DETECTED AT BYTE 54!")
+            self.success_combo = "Last sent command worked"
 
 
 # --- Execution Logic ---
@@ -176,13 +270,26 @@ async def main():
         ssid = await sense.fetch_wifi_ssid()
         print(f"Current Wi-Fi: {ssid}")
 
-        # 3. Fetch a one-time snapshot of the sensor data
+        # Start the live stream of data
+        # await sense.start_monitoring()
+
+        # Start parsing the payload
+        # await sense.start_parsing_payload()
+
+        # discover UUIDs
+        # await sense.discover_uuids()
+
+        # Set light level (0-3)
+        await sense.set_light_level(1)
+
+        #  Fetch a one-time snapshot of the sensor data
         raw_sensor = await sense.fetch_raw_sensor_data()
         print(f"\nRaw Sensor Data (Hex):\n{raw_sensor.hex(':')}")
-        print(f"Payload Length: {len(raw_sensor)} bytes")
+        print(f"Payload interpretation:")
+        parsed = sense.parse_payload(raw_sensor)
+        for k, v in parsed.items():
+            print(f"  {k}: {v}")
 
-        # Start the live stream of data
-        await sense.start_monitoring()
     except KeyboardInterrupt:
         logger.info("User stopped the monitor.")
 
