@@ -210,45 +210,48 @@ class RoroshettaSenseClient:
 
     def parse_payload(self, data: bytearray):
         """
-        Parses the 68-byte payload into a human-readable dictionary.
+        Safera IFU10CR-PRO Final Logic.
+        Offsets verified against user's live app readings.
         """
-        if len(data) < 68:
+        if len(data) < 69:
             return None
 
-        # 1. Temperature Calculation (Index 0-1)
-        # Based on BLE standards, usually: (Byte0 + Byte1*256) / 100
-        raw_temp = int.from_bytes(data[0:2], byteorder="little")
-        temp_c = raw_temp / 100.0
+        # 1. AQI (Confirmed: Offset 10-11)
+        aqi = int.from_bytes(data[10:12], "little")
 
-        # 2. Humidity Calculation (Index 2-3)
-        raw_hum = int.from_bytes(data[2:4], byteorder="little")
-        humidity = raw_hum / 100.0
+        # 2. eCO2 (Confirmed: Offset 15-16)
+        # Hex 92:01 = 402
+        eco2 = int.from_bytes(data[15:17], "little")
 
-        voc_raw = int.from_bytes(data[4:6], byteorder="little")
+        # 3. tVOC (Confirmed: Offset 17-18)
+        # Hex 11:00 = 17, 18:00 = 24
+        tvoc = int.from_bytes(data[17:19], "little")
 
-        # 3. Fan Level (Index 60)
-        # 0=0, 30=1, 60=2, 90=3, 120=4
+        # 4. Humidity & Temp (Theoretical based on byte fluctuations)
+        # In your last log, bytes 4-5 fluctuate like a sensor: 0x08fa, 0x08f9...
+        # 0x08fa = 2298. If this is humidity, it's 22.98%
+        hum_pct = int.from_bytes(data[4:6], "little") / 100.0
+
+        # Bytes 0-1 are 0x1b53 (6995). If this is temp, it's wrong.
+        # Let's try Offset 31: 0x001e = 30.
+        temp_c = data[31]
+
+        # 5. System Status
         fan_raw = data[60]
-        fan_level = fan_raw // 30
-
-        # Light Dimming (Index 54)
-        light_step = data[54]
-        # Actual brightness value (0-32767)
-        raw_brightness = int.from_bytes(data[55:57], byteorder="little")
-        brightness_pct = (raw_brightness / 32767) * 100
-
-        # 5. System Active Flag (Index 63)
-        fan_running = data[63] == 0x64
+        alarm_level = data[62]
+        # Heat Index (Confirmed: Offset 33-34)
+        # Hex 02:00 -> 2.0?
+        heat_index = int.from_bytes(data[33:35], "little") / 10.0
 
         return {
-            "temperature": f"{temp_c:.2f}°C",
-            "humidity": f"{humidity:.2f}%",
-            "air_quality_index (VOC)": voc_raw,
-            "fan_level": fan_level,
-            "fan_active": fan_running,
-            "light_step_id": light_step,
-            "brightness_actual": f"{brightness_pct:.1f}%",
-            "mode": "AUTO (Boost)" if fan_level == 4 else "MANUAL/IDLE",
+            "temperature": f"{temp_c:.1f}°C",
+            "humidity": f"{hum_pct:.1f}%",
+            "eCO2": f"{eco2} ppm",
+            "tVOC": f"{tvoc} ug/m3",
+            "AQI": aqi,
+            "heat_index": heat_index,
+            "alarm_level": f"{alarm_level}%",
+            "fan_raw": fan_raw,
         }
 
     async def start_parsing_payload(self):
@@ -258,9 +261,10 @@ class RoroshettaSenseClient:
         logger.info("Starting payload parser...")
 
         def handler(characteristic: BleakGATTCharacteristic, data: bytearray):
+            print(f"\n\n[Raw Data] ({len(data)} bytes): {data.hex(':')}")
             parsed = self.parse_payload(data)
             if parsed:
-                print("\n[Parsed Sensor Data]")
+                print("[Parsed Sensor Data]")
                 for k, v in parsed.items():
                     print(f"  {k}: {v}")
             else:
@@ -306,7 +310,7 @@ async def main():
         # await sense.start_monitoring()
 
         # Start parsing the payload
-        # await sense.start_parsing_payload()
+        await sense.start_parsing_payload()
 
         # Check light toggle brute force
         # await sense.run_brute_force()
@@ -318,12 +322,12 @@ async def main():
         await sense.set_fan_speed(level=4, auto=True)
 
         #  Fetch a one-time snapshot of the sensor data
-        raw_sensor = await sense.fetch_raw_sensor_data()
-        print(f"\nRaw Sensor Data (Hex):\n{raw_sensor.hex(':')}")
-        print(f"Payload interpretation:")
-        parsed = sense.parse_payload(raw_sensor)
-        for k, v in parsed.items():
-            print(f"  {k}: {v}")
+        # raw_sensor = await sense.fetch_raw_sensor_data()
+        # print(f"\nRaw Sensor Data (Hex):\n{raw_sensor.hex(':')}")
+        # print(f"Payload interpretation:")
+        # parsed = sense.parse_payload(raw_sensor)
+        # for k, v in parsed.items():
+        # print(f"  {k}: {v}")
 
     except KeyboardInterrupt:
         logger.info("User stopped the monitor.")
