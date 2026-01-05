@@ -83,6 +83,73 @@ class RoroshettaSenseClient:
         data = await self.client.read_gatt_char(self.CHAR_SENSOR_DATA)
         return data
 
+    def notification_handler(self, characteristic, data):
+        """
+        Callback function that triggers every time the sensor sends new data.
+        """
+        hex_data = data.hex(":")
+        print(f"\n[Live Data] Handle {characteristic.handle} ({len(data)} bytes):")
+        print(f"RAW: {hex_data}")
+
+        # Tip for analysis: look for bytes that change when you interact with the sensor
+        # e.g., blow on it to see CO2/Moisture change.
+
+    async def start_monitoring(self):
+        """
+        Subscribes to notifications for the sensor characteristic.
+        """
+        logger.info(f"Starting live monitor on {self.CHAR_SENSOR_DATA}...")
+        await self.client.start_notify(self.CHAR_SENSOR_DATA, self.notification_handler)
+
+        print("Monitoring... Press Ctrl+C to stop.")
+        try:
+            while True:
+                # Keep the loop alive while waiting for notifications
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await self.client.stop_notify(self.CHAR_SENSOR_DATA)
+            logger.info("Monitoring stopped.")
+
+    def parse_payload(self, data):
+        """
+        Parses the 68-byte payload into a human-readable dictionary.
+        """
+        if len(data) < 68:
+            return None
+
+        # 1. Temperature Calculation (Index 0-1)
+        # Based on BLE standards, usually: (Byte0 + Byte1*256) / 100
+        raw_temp = int.from_bytes(data[0:2], byteorder="little")
+        temp_c = raw_temp / 100.0
+
+        # 2. Humidity Calculation (Index 2-3)
+        raw_hum = int.from_bytes(data[2:4], byteorder="little")
+        humidity = raw_hum / 100.0
+
+        voc_raw = int.from_bytes(data[4:6], byteorder="little")
+
+        # 3. Fan Level (Index 60)
+        # 0=0, 30=1, 60=2, 90=3, 120=4
+        fan_raw = data[60]
+        fan_level = fan_raw // 30
+
+        # 4. Light Status (Index 54)
+        # We found 0x5a as the 'On' signal in previous tests
+        light_on = data[54] == 0x5A
+
+        # 5. System Active Flag (Index 63)
+        fan_running = data[63] == 0x64
+
+        return {
+            "temperature": f"{temp_c:.2f}°C",
+            "humidity": f"{humidity:.2f}%",
+            "air_quality_index (VOC)": voc_raw,
+            "fan_level": fan_level,
+            "fan_active": fan_running,
+            "light_on": light_on,
+            "mode": "AUTO (Boost)" if fan_level == 4 else "MANUAL/IDLE",
+        }
+
 
 # --- Execution Logic ---
 
@@ -106,8 +173,6 @@ async def main():
         print(f"Manufacturer: {info['manufacturer']}")
         print(f"Model:        {info['model']}")
         print(f"Device Name:  {info['ble_name']}")
-
-        # 2. Fetch Wi-Fi SSID dynamically (no longer hardcoded)
         ssid = await sense.fetch_wifi_ssid()
         print(f"Current Wi-Fi: {ssid}")
 
@@ -115,6 +180,11 @@ async def main():
         raw_sensor = await sense.fetch_raw_sensor_data()
         print(f"\nRaw Sensor Data (Hex):\n{raw_sensor.hex(':')}")
         print(f"Payload Length: {len(raw_sensor)} bytes")
+
+        # Start the live stream of data
+        await sense.start_monitoring()
+    except KeyboardInterrupt:
+        logger.info("User stopped the monitor.")
 
     except Exception as e:
         logger.error(f"An error occurred: {e}")
