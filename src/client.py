@@ -164,6 +164,46 @@ class RoroshettaSenseClient:
             self.CHAR_COMMAND_BABE, payload, response=False
         )
 
+    async def set_fan_speed(self, level: int, auto: bool = False):
+        """
+        Sets fan speed with correct protocol headers for Boost and Auto.
+        """
+
+        if auto:
+            # Auto mode: Service 04, Param 20, Value 02
+            payload = bytearray([0x04, 0x20, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00])
+            logger.info("Setting Fan to AUTO")
+
+        elif level == 4:
+            # BOOST sequence requires two commands
+            # 1. Set Speed to 120 (0x78) using standard fan service (01)
+            speed_payload = bytearray([0x01, 0x20, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00])
+            # 2. Activate Boost mode using boost service (02)
+            boost_payload = bytearray([0x02, 0x10, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00])
+
+            logger.info("Setting Fan to LEVEL 4 (Speed 120 + Boost Mode)")
+            await self.client.write_gatt_char(
+                self.CHAR_COMMAND_BABE, speed_payload, response=False
+            )
+            # Small delay is often needed for the device to process back-to-back writes
+            await asyncio.sleep(0.1)
+            payload = boost_payload
+
+        else:
+            # Normal levels (0-3): Service 01, Param 20
+            intensity_map = {0: 0x00, 1: 0x1E, 2: 0x3C, 3: 0x5A}
+            if level not in intensity_map:
+                logger.error("Invalid level (0-4)")
+                return
+
+            intensity = intensity_map[level]
+            payload = bytearray([0x01, 0x20, 0x00, 0x00, intensity, 0x00, 0x00, 0x00])
+            logger.info(f"Setting Fan level to {level}")
+
+        await self.client.write_gatt_char(
+            self.CHAR_COMMAND_BABE, payload, response=False
+        )
+
     #### WORK IN PROGRESS BELOW ####
     ### When methods are confirmed working, they will be moved above ###
     #### WORK IN PROGRESS BELOW ####
@@ -236,14 +276,6 @@ class RoroshettaSenseClient:
             await self.client.stop_notify(self.CHAR_SENSOR_DATA)
             logger.info("Payload parsing stopped.")
 
-    def check_light_status(
-        self, characteristic: BleakGATTCharacteristic, data: bytearray
-    ):
-        # Check index 54 for the light toggle (0x5a as seen in your logs)
-        if data[54] == 0x5A:
-            print(f"\n[!!!] SUCCESS DETECTED AT BYTE 54!")
-            self.success_combo = "Last sent command worked"
-
 
 # --- Execution Logic ---
 
@@ -276,11 +308,14 @@ async def main():
         # Start parsing the payload
         # await sense.start_parsing_payload()
 
+        # Check light toggle brute force
+        # await sense.run_brute_force()
+
         # discover UUIDs
         # await sense.discover_uuids()
 
-        # Set light level (0-3)
-        await sense.set_light_level(1)
+        # Set fan speed example
+        await sense.set_fan_speed(level=4, auto=True)
 
         #  Fetch a one-time snapshot of the sensor data
         raw_sensor = await sense.fetch_raw_sensor_data()
