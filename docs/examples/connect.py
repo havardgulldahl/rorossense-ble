@@ -1,0 +1,156 @@
+import argparse
+import asyncio
+import contextlib
+import logging
+from typing import Iterable
+
+from bleak import BleakClient, BleakScanner
+from bleak.backends.characteristic import BleakGATTCharacteristic
+
+logger = logging.getLogger(__name__)
+
+
+class Args(argparse.Namespace):
+    device: str
+    uuid: str
+    by_address: bool
+    macos_use_bdaddr: bool
+    debug: bool
+
+
+async def connect_to_device(
+    lock: asyncio.Lock,
+    by_address: bool,
+    macos_use_bdaddr: bool,
+    name_or_address: str,
+    notify_uuid: str,
+):
+    """
+    Scan and connect to a device then print notifications for 10 seconds before
+    disconnecting.
+
+    Args:
+        lock:
+            The same lock must be passed to all calls to this function.
+        by_address:
+            If true, treat *name_or_address* as an address, otherwise treat
+            it as a name.
+        macos_use_bdaddr:
+            If true, enable hack to allow use of Bluetooth address instead of
+            UUID on macOS.
+        name_or_address:
+            The Bluetooth address/UUID of the device to connect to.
+        notify_uuid:
+            The UUID of a characteristic that supports notifications.
+    """
+    logger.info("starting %s task", name_or_address)
+
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+
+            # Trying to establish a connection to two devices at the same time
+            # can cause errors, so use a lock to avoid this.
+            async with lock:
+                logger.info("scanning for %s", name_or_address)
+
+                if by_address:
+                    device = await BleakScanner.find_device_by_address(
+                        name_or_address, cb={"use_bdaddr": macos_use_bdaddr}
+                    )
+                else:
+                    device = await BleakScanner.find_device_by_name(name_or_address)
+
+                logger.info("stopped scanning for %s", name_or_address)
+
+                if device is None:
+                    logger.error("%s not found", name_or_address)
+                    return
+
+                logger.info("connecting to %s", name_or_address)
+
+                client = await stack.enter_async_context(BleakClient(device))
+
+                logger.info("connected to %s", name_or_address)
+                # This will be called immediately before client.__aexit__ when
+                # the stack context manager exits.
+                stack.callback(logger.info, "disconnecting from %s", name_or_address)
+
+            # The lock is released here. The device is still connected and the
+            # Bluetooth adapter is now free to scan and connect another device
+            # without disconnecting this one.
+
+            def callback(_: BleakGATTCharacteristic, data: bytearray) -> None:
+                logger.info("%s received %r", name_or_address, data)
+
+            await client.start_notify(notify_uuid, callback)
+            await asyncio.sleep(10.0)
+            await client.stop_notify(notify_uuid)
+
+        # The stack context manager exits here, triggering disconnection.
+
+        logger.info("disconnected from %s", name_or_address)
+
+    except Exception:
+        logger.exception("error with %s", name_or_address)
+
+
+async def main(
+    by_address: bool,
+    macos_use_bdaddr: bool,
+    address: str,
+    uuid: str,
+):
+    lock = asyncio.Lock()
+
+    await connect_to_device(lock, by_address, macos_use_bdaddr, address, uuid)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "device",
+        metavar="<device>",
+        help="Bluetooth name or address of device to connect to",
+    )
+    parser.add_argument(
+        "uuid",
+        metavar="<uuid>",
+        help="notification characteristic UUID",
+    )
+
+    parser.add_argument(
+        "--by-address",
+        action="store_true",
+        help="when true treat <device> args as Bluetooth address instead of name",
+    )
+
+    parser.add_argument(
+        "--macos-use-bdaddr",
+        action="store_true",
+        help="when true use Bluetooth address instead of UUID on macOS",
+    )
+
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="sets the log level to debug",
+    )
+
+    args = parser.parse_args(namespace=Args())
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)-15s %(name)-8s %(levelname)s: %(message)s",
+    )
+
+    asyncio.run(
+        main(
+            args.by_address,
+            args.macos_use_bdaddr,
+            args.device,
+            args.uuid,
+        )
+    )
