@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from enum import IntEnum
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
@@ -9,6 +10,23 @@ from dotenv import load_dotenv
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class FanSpeed(IntEnum):
+    OFF = 0
+    LEVEL_1 = 1
+    LEVEL_2 = 2
+    LEVEL_3 = 3
+    BOOST = 4
+    AUTO = 128
+
+
+class LightLevel(IntEnum):
+    OFF = 0
+    LEVEL_1 = 1
+    LEVEL_2 = 2
+    LEVEL_3 = 3
+    AUTO = 98
 
 
 class RoroshettaSenseClient:
@@ -145,15 +163,20 @@ class RoroshettaSenseClient:
                 print(f"    Handle: {char.handle} (Hex: {hex(char.handle)})")
                 print(f"    Properties: {char.properties}")
 
-    async def set_light_level(self, level: int):
+    async def set_light_level(self, level: LightLevel):
         """
-        Sets light level: 0 (Off), 1 (30), 2 (60), 3 (90)
+        Sets light level: OFF, LEVEL_1, LEVEL_2, LEVEL_3
         """
         # Map levels to the byte values found in the Wireshark log index 4
-        intensity_map = {0: 0x00, 1: 0x1E, 2: 0x3C, 3: 0x5A}
+        intensity_map = {
+            LightLevel.OFF: 0x00,
+            LightLevel.LEVEL_1: 0x1E,
+            LightLevel.LEVEL_2: 0x3C,
+            LightLevel.LEVEL_3: 0x5A,
+        }
 
         if level not in intensity_map:
-            logger.error("Invalid level. Choose 0, 1, 2, or 3.")
+            logger.error("Invalid level. Choose OFF, LEVEL_1, LEVEL_2, or LEVEL_3.")
             return
 
         intensity = intensity_map[level]
@@ -162,7 +185,7 @@ class RoroshettaSenseClient:
         payload = bytearray([0x05, 0x20, 0x00, 0x00, intensity, 0x00, 0x00, 0x00])
 
         logger.info(
-            f"Sending Command to {self.CHAR_COMMAND_BABE}: Level {level} ({intensity:#04x})"
+            f"Sending Command to {self.CHAR_COMMAND_BABE}: Level {level.name} ({intensity:#04x})"
         )
 
         # Use response=False to trigger Opcode 0x52 (Write Command)
@@ -170,17 +193,21 @@ class RoroshettaSenseClient:
             self.CHAR_COMMAND_BABE, payload, response=False
         )
 
-    async def set_fan_speed(self, level: int, auto: bool = False):
+    async def set_fan_speed(self, level: FanSpeed):
         """
         Sets fan speed with correct protocol headers for Boost and Auto.
+        Accepts FanSpeed IntEnum, where AUTO is a bit flag (128).
         """
+        is_auto = bool(level & FanSpeed.AUTO)
+        # Strip the AUTO bit to get the requested speed level
+        target_level = level & ~FanSpeed.AUTO
 
-        if auto:
+        if is_auto:
             # Auto mode: Service 04, Param 20, Value 02
             payload = bytearray([0x04, 0x20, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00])
             logger.info("Setting Fan to AUTO")
 
-        elif level == 4:
+        elif target_level == FanSpeed.BOOST:
             # BOOST sequence requires two commands
             # 1. Set Speed to 120 (0x78) using standard fan service (01)
             speed_payload = bytearray([0x01, 0x20, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00])
@@ -197,14 +224,20 @@ class RoroshettaSenseClient:
 
         else:
             # Normal levels (0-3): Service 01, Param 20
-            intensity_map = {0: 0x00, 1: 0x1E, 2: 0x3C, 3: 0x5A}
-            if level not in intensity_map:
-                logger.error("Invalid level (0-4)")
+            # Map enum values to intensity bytes
+            intensity_map = {
+                FanSpeed.OFF: 0x00,
+                FanSpeed.LEVEL_1: 0x1E,
+                FanSpeed.LEVEL_2: 0x3C,
+                FanSpeed.LEVEL_3: 0x5A,
+            }
+            if target_level not in intensity_map:
+                logger.error(f"Invalid level {target_level}")
                 return
 
-            intensity = intensity_map[level]
+            intensity = intensity_map[target_level]
             payload = bytearray([0x01, 0x20, 0x00, 0x00, intensity, 0x00, 0x00, 0x00])
-            logger.info(f"Setting Fan level to {level}")
+            logger.info(f"Setting Fan level to {FanSpeed(target_level).name}")
 
         await self.client.write_gatt_char(
             self.CHAR_COMMAND_BABE, payload, response=False
@@ -240,26 +273,40 @@ class RoroshettaSenseClient:
 
         # Map Steps
         fan_steps = {
-            0: "OFF",
-            30: "Level 1",
-            60: "Level 2",
-            90: "Level 3",
-            120: "Level 4 (Boost)",
+            0: FanSpeed.OFF,
+            30: FanSpeed.LEVEL_1,
+            60: FanSpeed.LEVEL_2,
+            90: FanSpeed.LEVEL_3,
+            120: FanSpeed.BOOST,
         }
-        current_step = fan_steps.get(fan_step_raw, f"Unknown ({fan_step_raw})")
+
+        # Get readable name from enum if possible
+        if fan_step_raw in fan_steps:
+            enum_val = fan_steps[fan_step_raw]
+            current_step = enum_val.name.replace("_", " ").title()
+            if enum_val == FanSpeed.BOOST:
+                current_step += " (Boost)"
+        else:
+            current_step = f"Unknown ({fan_step_raw})"
 
         fan_display = f"AUTO ({current_step})" if is_auto else current_step
 
         # 4. Light Status (Verified Offsets 53-56)
         light_step_raw = data[53]
-        light_levels = {
-            0: "OFF",
-            30: "Level 1",
-            60: "Level 2",
-            90: "Level 3",
-            100: "AUTO",
+        light_levels_map = {
+            0: LightLevel.OFF,
+            30: LightLevel.LEVEL_1,
+            60: LightLevel.LEVEL_2,
+            90: LightLevel.LEVEL_3,
+            100: LightLevel.AUTO,
         }
-        light_state = light_levels.get(light_step_raw, f"Unknown ({light_step_raw})")
+
+        if light_step_raw in light_levels_map:
+            enum_val = light_levels_map[light_step_raw]
+            light_state = enum_val.name.replace("_", " ").title()
+        else:
+            light_state = f"Unknown ({light_step_raw})"
+
         brightness_val = int.from_bytes(data[55:57], "little")
 
         # 5. Safety Metrics
@@ -361,7 +408,7 @@ async def main():
         await sense.discover_uuids()
 
         # Set fan speed example
-        # await sense.set_fan_speed(level=4, auto=True)
+        # await sense.set_fan_speed(level=FanSpeed.BOOST | FanSpeed.AUTO)
 
         #  Fetch a one-time snapshot of the sensor data
         # raw_sensor = await sense.fetch_raw_sensor_data()
