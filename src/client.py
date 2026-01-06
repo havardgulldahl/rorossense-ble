@@ -6,7 +6,11 @@ from enum import IntEnum
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
-from dotenv import load_dotenv
+
+from bleak_retry_connector import (
+    establish_connection,
+)  # pip install bleak-retry-connector
+from dotenv import load_dotenv  # pip install python-dotenv
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -68,7 +72,6 @@ class RoroshettaSenseClient:
 
     def __init__(self, device: BLEDevice):
         self.device = device
-        self.address = device.address
         self.client: BleakClient | None = None
         self.last_raw_data = None  # Storage for delta comparison
         # Memory to store last known states
@@ -76,8 +79,12 @@ class RoroshettaSenseClient:
 
     async def connect(self):
         """Establish connection with the BLE device."""
-        logger.info(f"Connecting to {self.address}...")
-        self.client = BleakClient(self.device)
+        logger.info(f"Connecting to {self.device.address}...")
+        # Using establish_connection makes it HA-compatible
+        # but also works fine standalone
+        self.client = await establish_connection(
+            BleakClient, self.device, self.device.address
+        )
         await self.client.connect()
         logger.info(f"Connected successfully: {self.client.is_connected}")
 
