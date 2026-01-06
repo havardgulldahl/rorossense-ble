@@ -3,56 +3,54 @@ import logging
 import os
 from bleak import BleakClient, BleakScanner
 
-# Setter opp logging
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 async def explore_device(address):
-    logger.info("Søker etter enhet: %s", address)
+    logger.info("Scanning for device: %s", address)
     device = await BleakScanner.find_device_by_address(
         address, timeout=10.0, cb={"use_bdaddr": True}
     )
 
     if not device:
-        logger.error("Fant ikke enheten.")
+        logger.error("Device not found.")
         return
 
     async with BleakClient(device) as client:
-        logger.info(f"Tilkoblet: {client.is_connected}")
+        logger.info(f"Connected: {client.is_connected}")
 
-        # Går gjennom alle tjenester (Services)
+        # Iterate through all Services
         for service in client.services:
             logger.info(f"\n" + "=" * 60)
             logger.info(f"SERVICE: {service.uuid} ({service.description})")
             logger.info("=" * 60)
 
-            # Går gjennom alle egenskaper (Characteristics) i tjenesten
+            # Iterate through all Characteristics in the service
             for char in service.characteristics:
                 logger.info(f"\n  [Characteristic] {char.uuid}")
-                logger.info(f"    Beskrivelse: {char.description}")
+                logger.info(f"    Description: {char.description}")
                 logger.info(f"    Handle: {char.handle}")
-                logger.info(
-                    f"    Egenskaper (Properties): {', '.join(char.properties)}"
-                )
+                logger.info(f"    Properties: {', '.join(char.properties)}")
 
-                # Hvis karakteristikken kan leses ("read"), prøver vi å hente verdien
+                # If the characteristic can be read, try to fetch the value
                 if "read" in char.properties:
                     try:
                         value = await client.read_gatt_char(char.uuid)
-                        # Viser verdien som Hex (for sensor-verdier) og som String (for navn/versjoner)
+                        # Show value as Hex (for sensor values) and as String (for names/versions)
                         hex_val = value.hex(":")
                         try:
                             str_val = value.decode("utf-8")
                         except:
-                            str_val = "<Kunne ikke tolkes som tekst>"
+                            str_val = "<Could not interpret as text>"
 
-                        logger.info(f"    Nåværende verdi (Hex): {hex_val}")
-                        logger.info(f"    Nåværende verdi (Str): {str_val}")
+                        logger.info(f"    Current value (Hex): {hex_val}")
+                        logger.info(f"    Current value (Str): {str_val}")
                     except Exception as e:
-                        logger.warning(f"    Kunne ikke lese verdi: {e}")
+                        logger.warning(f"    Could not read value: {e}")
 
-                # Går gjennom alle beskrivelser (Descriptors) for denne karakteristikken
+                # Iterate through all Descriptors for this characteristic
                 for descriptor in char.descriptors:
                     logger.info(
                         f"    [Descriptor] {descriptor.uuid} (Handle: {descriptor.handle})"
@@ -61,9 +59,9 @@ async def explore_device(address):
                         desc_value = await client.read_gatt_descriptor(
                             descriptor.handle
                         )
-                        logger.info(f"      Verdi: {desc_value}")
+                        logger.info(f"      Value: {desc_value}")
                     except Exception as e:
-                        logger.info(f"      Kunne ikke lese descriptor: {e}")
+                        logger.info(f"      Could not read descriptor: {e}")
 
 
 if __name__ == "__main__":
@@ -75,4 +73,4 @@ if __name__ == "__main__":
     if ADDRESS:
         asyncio.run(explore_device(ADDRESS))
     else:
-        logger.error("Fant ingen adresse i .env fila.")
+        logger.error("Found no address in .env file.")
