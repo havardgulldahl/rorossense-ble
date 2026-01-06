@@ -3,6 +3,7 @@ import logging
 import os
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.device import BLEDevice
 from dotenv import load_dotenv
 
 # Setup logging
@@ -37,10 +38,13 @@ class RoroshettaSenseClient:
     CHAR_ABD2 = "0000abd2-1212-efde-1523-785fef13d123"
     CHAR_ABD3 = "0000abd3-1212-efde-1523-785fef13d123"
 
-    def __init__(self, address):
+    def __init__(self, address: str):
         self.address = address
-        self.client = None
-        self.device = None
+        self.client: BleakClient | None = None
+        self.device: BLEDevice | None = None
+        self.last_raw_data = None  # Storage for delta comparison
+        # Memory to store last known states
+        self.state = {"fan_level": "OFF", "light_level": "OFF", "brightness": 0}
 
     async def connect(self):
         """Establish connection with the BLE device."""
@@ -133,9 +137,11 @@ class RoroshettaSenseClient:
         """Prints all services and characteristics with their handles."""
         print(f"\n--- GATT Discovery for {self.address} ---")
         for service in self.client.services:
-            print(f"\nService: {service.uuid} (Handle: {service.handle})")
+            print(
+                f"\nService: {service.uuid} - {service.description} (Handle: {service.handle})"
+            )
             for char in service.characteristics:
-                print(f"  Characteristic: {char.uuid}")
+                print(f"  Characteristic: {char.uuid} - {char.description}")
                 print(f"    Handle: {char.handle} (Hex: {hex(char.handle)})")
                 print(f"    Properties: {char.properties}")
 
@@ -211,37 +217,70 @@ class RoroshettaSenseClient:
     def parse_payload(self, data: bytearray):
         """
         Safera IFU10CR-PRO Final Logic.
-        Offsets verified against user's live app readings.
         """
         if len(data) < 69:
             return None
 
-        # 1. AQI (Confirmed: Offset 10-11)
-        aqi = int.from_bytes(data[10:12], "little")
-
-        # 2. eCO2 (Confirmed: Offset 15-16)
-        # Hex 92:01 = 402
-        eco2 = int.from_bytes(data[15:17], "little")
-
-        # 3. tVOC (Confirmed: Offset 17-18)
-        # Hex 11:00 = 17, 18:00 = 24
-        tvoc = int.from_bytes(data[17:19], "little")
-
-        # 4. Humidity & Temp (Theoretical based on byte fluctuations)
-        # In your last log, bytes 4-5 fluctuate like a sensor: 0x08fa, 0x08f9...
-        # 0x08fa = 2298. If this is humidity, it's 22.98%
+        # 1. Environmental Sensors
+        # Indices based on your app's verified 20°C/23% readings
+        temp_c = data[31]  # Observed stable byte for temperature
         hum_pct = int.from_bytes(data[4:6], "little") / 100.0
 
-        # Bytes 0-1 are 0x1b53 (6995). If this is temp, it's wrong.
-        # Let's try Offset 31: 0x001e = 30.
-        temp_c = data[31]
+        # 2. Air Quality Metrics (Verified offsets 10-18)
+        aqi = int.from_bytes(data[10:12], "little")  # 0x1388 = 5000
+        eco2 = int.from_bytes(data[15:17], "little")  # 0x0192 = 402 ppm
+        tvoc = int.from_bytes(data[17:19], "little")  # Fluctuates around 40-60
 
-        # 5. System Status
-        fan_raw = data[60]
+        # 3. Fan Status (Verified Offsets 60 and 63)
+        fan_step_raw = data[60]
+        fan_mode_raw = data[63]
+
+        # Determine Mode
+        is_auto = fan_mode_raw == 30
+
+        # Map Steps
+        fan_steps = {
+            0: "OFF",
+            30: "Level 1",
+            60: "Level 2",
+            90: "Level 3",
+            120: "Level 4 (Boost)",
+        }
+        current_step = fan_steps.get(fan_step_raw, f"Unknown ({fan_step_raw})")
+
+        fan_display = f"AUTO ({current_step})" if is_auto else current_step
+
+        # 4. Light Status (Verified Offsets 53-56)
+        light_step_raw = data[53]
+        light_levels = {
+            0: "OFF",
+            30: "Level 1",
+            60: "Level 2",
+            90: "Level 3",
+            100: "AUTO",
+        }
+        light_state = light_levels.get(light_step_raw, f"Unknown ({light_step_raw})")
+        brightness_val = int.from_bytes(data[55:57], "little")
+
+        # 5. Safety Metrics
         alarm_level = data[62]
-        # Heat Index (Confirmed: Offset 33-34)
-        # Hex 02:00 -> 2.0?
         heat_index = int.from_bytes(data[33:35], "little") / 10.0
+
+        # . Presence Sensor
+        # Byte 50: Presence Flag (0/1)
+        # Byte 51: Activity Level Scale (0-255)
+        presence = data[50] == 0x01
+        activity_level = data[51]
+
+        # Simple mapping for activity level
+        if activity_level == 0:
+            activity_label = "None"
+        elif activity_level < 20:
+            activity_label = "Low"
+        elif activity_level < 60:
+            activity_label = "Medium"
+        else:
+            activity_label = "High"
 
         return {
             "temperature": f"{temp_c:.1f}°C",
@@ -249,9 +288,13 @@ class RoroshettaSenseClient:
             "eCO2": f"{eco2} ppm",
             "tVOC": f"{tvoc} ug/m3",
             "AQI": aqi,
+            "fan_status": fan_display,
+            "light_status": light_state,
+            "brightness": brightness_val,
             "heat_index": heat_index,
             "alarm_level": f"{alarm_level}%",
-            "fan_raw": fan_raw,
+            "presence": "Detected" if presence else "Clear",
+            "activity": f"{activity_label} ({activity_level})",
         }
 
     async def start_parsing_payload(self):
@@ -275,7 +318,7 @@ class RoroshettaSenseClient:
         print("Parsing... Press Ctrl+C to stop.")
         try:
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
         except asyncio.CancelledError:
             await self.client.stop_notify(self.CHAR_SENSOR_DATA)
             logger.info("Payload parsing stopped.")
@@ -309,17 +352,16 @@ async def main():
         # Start the live stream of data
         # await sense.start_monitoring()
 
-        # Start parsing the payload
-        await sense.start_parsing_payload()
+        # await sense.start_parsing_payload()
 
         # Check light toggle brute force
         # await sense.run_brute_force()
 
         # discover UUIDs
-        # await sense.discover_uuids()
+        await sense.discover_uuids()
 
         # Set fan speed example
-        await sense.set_fan_speed(level=4, auto=True)
+        # await sense.set_fan_speed(level=4, auto=True)
 
         #  Fetch a one-time snapshot of the sensor data
         # raw_sensor = await sense.fetch_raw_sensor_data()
