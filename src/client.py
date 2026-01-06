@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import logging
 import os
@@ -48,6 +49,15 @@ class RoroshettaSenseClient:
     CHAR_MODEL_NAME = "00002a24-0000-1000-8000-00805f9b34fb"
     # Handle 15: Standard Bluetooth Manufacturer Name
     CHAR_MANUFACTURER = "00002a29-0000-1000-8000-00805f9b34fb"
+    # Handle 19: Standard Bluetooth Serial Number
+    CHAR_SERIAL_NUMBER = "00002a25-0000-1000-8000-00805f9b34fb"
+    # Handle 21: Standard Bluetooth Hardware Revision
+    CHAR_HARDWARE_REV = "00002a27-0000-1000-8000-00805f9b34fb"
+    # Handle 23: Standard Bluetooth Firmware
+    CHAR_FIRMWARE_REV = "00002a26-0000-1000-8000-00805f9b34fb"
+    # Handle 25: Standard Bluetooth Software Revision
+    CHAR_SOFTWARE_REV = "00002a28-0000-1000-8000-00805f9b34fb"
+
     # Handle 35: Command Pipe for sending control commands
     CHAR_COMMAND_ABBA = (
         "0000abba-1212-efde-1523-785fef13d123"  # Handle 35 (Command Pipe)
@@ -56,10 +66,10 @@ class RoroshettaSenseClient:
     CHAR_ABD2 = "0000abd2-1212-efde-1523-785fef13d123"
     CHAR_ABD3 = "0000abd3-1212-efde-1523-785fef13d123"
 
-    def __init__(self, address: str):
-        self.address = address
+    def __init__(self, device: BLEDevice):
+        self.device = device
+        self.address = device.address
         self.client: BleakClient | None = None
-        self.device: BLEDevice | None = None
         self.last_raw_data = None  # Storage for delta comparison
         # Memory to store last known states
         self.state = {"fan_level": "OFF", "light_level": "OFF", "brightness": 0}
@@ -67,9 +77,6 @@ class RoroshettaSenseClient:
     async def connect(self):
         """Establish connection with the BLE device."""
         logger.info(f"Connecting to {self.address}...")
-        self.device = await BleakScanner.find_device_by_address(
-            self.address, timeout=10.0, cb={"use_bdaddr": True}
-        )
         self.client = BleakClient(self.device)
         await self.client.connect()
         logger.info(f"Connected successfully: {self.client.is_connected}")
@@ -85,9 +92,18 @@ class RoroshettaSenseClient:
         raw_model = await self.client.read_gatt_char(self.CHAR_MODEL_NAME)
         raw_manu = await self.client.read_gatt_char(self.CHAR_MANUFACTURER)
 
+        raw_serial = await self.client.read_gatt_char(self.CHAR_SERIAL_NUMBER)
+        raw_hw_rev = await self.client.read_gatt_char(self.CHAR_HARDWARE_REV)
+        raw_fw_rev = await self.client.read_gatt_char(self.CHAR_FIRMWARE_REV)
+        raw_sw_rev = await self.client.read_gatt_char(self.CHAR_SOFTWARE_REV)
+
         return {
             "manufacturer": raw_manu.decode("utf-8").strip(),
             "model": raw_model.decode("utf-8").strip(),
+            "serial_number": raw_serial.decode("utf-8").strip(),
+            "hardware_revision": raw_hw_rev.decode("utf-8").strip(),
+            "firmware_revision": raw_fw_rev.decode("utf-8").strip(),
+            "software_revision": raw_sw_rev.decode("utf-8").strip(),
             "ble_name": self.client.name,
         }
 
@@ -133,12 +149,12 @@ class RoroshettaSenseClient:
         logger.info(f"Starting live monitor on {self.CHAR_SENSOR_DATA}...")
         await self.client.start_notify(self.CHAR_SENSOR_DATA, self.notification_handler)
 
-        logger.info(f"Starting live monitor on {self.CHAR_ABD2}...")
-        await self.client.start_notify(self.CHAR_ABD2, self.notification_handler)
-        logger.info(f"Starting live monitor on {self.CHAR_COMMAND_ABBA}...")
-        await self.client.start_notify(
-            self.CHAR_COMMAND_ABBA, self.notification_handler
-        )
+        # logger.info(f"Starting live monitor on {self.CHAR_ABD2}...")
+        # await self.client.start_notify(self.CHAR_ABD2, self.notification_handler)
+        # logger.info(f"Starting live monitor on {self.CHAR_COMMAND_ABBA}...")
+        # await self.client.start_notify(
+        # self.CHAR_COMMAND_ABBA, self.notification_handler
+        # )
 
         print("Monitoring... Press Ctrl+C to stop.")
         try:
@@ -147,8 +163,8 @@ class RoroshettaSenseClient:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             await self.client.stop_notify(self.CHAR_SENSOR_DATA)
-            await self.client.stop_notify(self.CHAR_COMMAND_ABBA)
-            await self.client.stop_notify(self.CHAR_ABD2)
+            # await self.client.stop_notify(self.CHAR_COMMAND_ABBA)
+            # await self.client.stop_notify(self.CHAR_ABD2)
             logger.info("Monitoring stopped.")
 
     async def discover_uuids(self):
@@ -376,47 +392,97 @@ class RoroshettaSenseClient:
 
 async def main():
     load_dotenv()
-    address = os.getenv("ADDRESS")
+
+    parser = argparse.ArgumentParser(description="RørosHetta Sense BLE Client")
+    parser.add_argument("--address", help="BLE Device Address (overrides .env)")
+
+    # Action group
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--info", action="store_true", help="Fetch device info and Wi-Fi SSID"
+    )
+    group.add_argument("--monitor", action="store_true", help="Start raw monitoring")
+    group.add_argument(
+        "--parse", action="store_true", help="Start parsing payload live"
+    )
+    group.add_argument(
+        "--discover", action="store_true", help="Discover GATT services and uuids"
+    )
+    group.add_argument(
+        "--light",
+        choices=["OFF", "1", "2", "3"],
+        help="Set light level (OFF, 1, 2, 3)",
+    )
+    group.add_argument(
+        "--fan",
+        choices=["OFF", "1", "2", "3", "BOOST", "AUTO"],
+        help="Set fan speed",
+    )
+
+    args = parser.parse_args()
+    address = args.address or os.getenv("ADDRESS")
 
     if not address:
-        logger.error("No Bluetooth address found in .env file.")
+        logger.error(
+            "No Bluetooth address found. Use --address or set ADDRESS in .env file."
+        )
         return
 
-    sense = RoroshettaSenseClient(address)
+    logger.info(f"Scanning for device {address}...")
+    device = await BleakScanner.find_device_by_address(
+        address, timeout=10.0, cb={"use_bdaddr": True}
+    )
+    if not device:
+        logger.error(f"Device with address {address} not found.")
+        return
+
+    sense = RoroshettaSenseClient(device)
 
     try:
         await sense.connect()
 
-        # 1. Fetch and display device identity
-        info = await sense.fetch_model_info()
-        print(f"\n--- Device Info ---")
-        print(f"Manufacturer: {info['manufacturer']}")
-        print(f"Model:        {info['model']}")
-        print(f"Device Name:  {info['ble_name']}")
-        ssid = await sense.fetch_wifi_ssid()
-        print(f"Current Wi-Fi: {ssid}")
+        if args.info:
+            # 1. Fetch and display device identity
+            info = await sense.fetch_model_info()
+            print(f"\n--- Device Info ---")
+            print(f"Manufacturer: {info['manufacturer']}")
+            print(f"Model:        {info['model']}")
+            print(f"Device Name:  {info['ble_name']}")
+            print(f"Serial No.:   {info['serial_number']}")
+            print(f"Hardware Rev: {info['hardware_revision']}")
+            print(f"Firmware Rev: {info['firmware_revision']}")
+            print(f"Software Rev: v.{info['software_revision']}")
+            ssid = await sense.fetch_wifi_ssid()
+            print(f"Current Wi-Fi: {ssid}")
 
-        # Start the live stream of data
-        # await sense.start_monitoring()
+        elif args.monitor:
+            await sense.start_monitoring()
 
-        # await sense.start_parsing_payload()
+        elif args.parse:
+            await sense.start_parsing_payload()
 
-        # Check light toggle brute force
-        # await sense.run_brute_force()
+        elif args.discover:
+            await sense.discover_uuids()
 
-        # discover UUIDs
-        await sense.discover_uuids()
+        elif args.light:
+            level_map = {
+                "OFF": LightLevel.OFF,
+                "1": LightLevel.LEVEL_1,
+                "2": LightLevel.LEVEL_2,
+                "3": LightLevel.LEVEL_3,
+            }
+            await sense.set_light_level(level_map[args.light])
 
-        # Set fan speed example
-        # await sense.set_fan_speed(level=FanSpeed.BOOST | FanSpeed.AUTO)
-
-        #  Fetch a one-time snapshot of the sensor data
-        # raw_sensor = await sense.fetch_raw_sensor_data()
-        # print(f"\nRaw Sensor Data (Hex):\n{raw_sensor.hex(':')}")
-        # print(f"Payload interpretation:")
-        # parsed = sense.parse_payload(raw_sensor)
-        # for k, v in parsed.items():
-        # print(f"  {k}: {v}")
+        elif args.fan:
+            level_map = {
+                "OFF": FanSpeed.OFF,
+                "1": FanSpeed.LEVEL_1,
+                "2": FanSpeed.LEVEL_2,
+                "3": FanSpeed.LEVEL_3,
+                "BOOST": FanSpeed.BOOST,
+                "AUTO": FanSpeed.AUTO,
+            }
+            await sense.set_fan_speed(level_map[args.fan])
 
     except KeyboardInterrupt:
         logger.info("User stopped the monitor.")
