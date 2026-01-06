@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class RoroshettaSenseClient:
+class SaferaSenseClient:
     """
     Client for interacting with Røroshetta Sense (manufactured by Safera Oy).
     This class handles connection and data retrieval from GATT characteristics.
@@ -91,12 +91,14 @@ class RoroshettaSenseClient:
         raw_sw_rev = await self.client.read_gatt_char(self.CHAR_SOFTWARE_REV)
         raw_ssid_data = await self.client.read_gatt_char(self.CHAR_WIFI_SSID)
 
-        _ssid_strings = [
+        _ssid_parts = [
             s.decode("utf-8", errors="ignore").strip()
             for s in raw_ssid_data.split(b"\x00")
+            if s
         ]
         # TODO: figure out what the multiple strings are
         # logger.info(f"The SSID data, split at null bytes: {_ssid_strings}")
+        # wifi_ssid, hostname, version_info = _ssid_strings
 
         return SaferaDeviceInfo(
             manufacturer=raw_manu.decode("utf-8").strip(),
@@ -107,7 +109,7 @@ class RoroshettaSenseClient:
             hardware_rev=raw_hw_rev.decode("utf-8").strip(),
             firmware_rev=raw_fw_rev.decode("utf-8").strip(),
             software_rev=raw_sw_rev.decode("utf-8").strip(),
-            wifi_ssid=raw_ssid_data.split(b"\x00")[0].decode("utf-8", errors="ignore"),
+            wifi_ssid=_ssid_parts[0] if _ssid_parts else "",
         )
 
     async def fetch_raw_sensor_data(self):
@@ -342,7 +344,7 @@ async def main():
         logger.error(f"Device with address {address} not found.")
         return
 
-    sense = RoroshettaSenseClient(device)
+    sense = SaferaSenseClient(device)
 
     try:
         await sense.connect()
