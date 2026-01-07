@@ -299,6 +299,8 @@ class SaferaSenseClient:
 
 
 async def main():
+    from dotenv import load_dotenv  # pip install python-dotenv
+
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="RørosHetta Sense BLE Client")
