@@ -160,7 +160,7 @@ class SaferaSenseClient:
 
     async def discover_uuids(self):
         """Prints all services and characteristics with their handles."""
-        print(f"\n--- GATT Discovery for {self.address} ---")
+        print(f"\n--- GATT Discovery for {self.client.address} ---")
         for service in self.client.services:
             print(
                 f"\nService: {service.uuid} - {service.description} (Handle: {service.handle})"
