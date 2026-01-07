@@ -2,6 +2,12 @@
 
 This document describes the reverse-engineered Bluetooth Low Energy (BLE) protocol for the Safera Sense smart cooking sensor (also known as RørosHetta Sense), Model `IFU10CR-PRO`.
 
+## Methodology
+
+I have fed sensor readings to Gemini, while changing the settings from the official app, one by one. 
+
+To get the raw bytes, I have used an Android phone in developer mode, connected to a machine running Wireshark. 
+
 ## Connection Details
 
 *   **Manufacturer**: Safera Oy
