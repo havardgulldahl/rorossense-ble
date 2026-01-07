@@ -1,9 +1,24 @@
 {
-  "domain": "my_kitchen_fan",
-  "name": "Kitchen Fan BLE",
-  "codeowners": ["@yourusername"],
-  "dependencies": ["bluetooth"],
-  "requirements": ["bleak==0.21.1"],
-  "iot_class": "local_polling"
+  "domain": "safera_sense_fan",
+  "name": "Safera Sense Fan BLE",
+  "codeowners": [
+    "@havardgulldahl"
+  ],
+  "dependencies": [
+    "bluetooth"
+  ],
+  "requirements": [
+    "bleak-retry-connector>=1.20.0"
+  ],
+  "iot_class": "local_polling",
+  "version": "0.0.1.0",
+  "config_flow": true,
+  "bluetooth": [
+    {
+      "local_name": "iSense*"
+    },
+    {
+      "service_uuid": "0000180f-0000-1000-8000-00805f9b34fb"
+    }
+  ]
 }
-

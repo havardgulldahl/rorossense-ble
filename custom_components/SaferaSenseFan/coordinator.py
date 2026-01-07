@@ -6,7 +6,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.components.bluetooth import async_ble_device_from_address
 
 from .const import DOMAIN
-from .src.client import SaferaSensorData, SaferaDeviceInfo, SaferaSenseClient
+from client import SaferaSensorData, SaferaDeviceInfo, SaferaSenseClient
 
 _LOGGER = logging.getLogger(__name__)
 
