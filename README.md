@@ -87,6 +87,29 @@ async def chef_mode():
 asyncio.run(chef_mode())
 ```
 
+### Command line ###
+
+The client may also be run as a standalone script
+
+```bash
+
+usage: client.py [-h] [--address ADDRESS] (--info | --monitor | --parse | --discover | --light {OFF,1,2,3} | --fan {OFF,1,2,3,BOOST,AUTO})
+
+RørosHetta Sense BLE Client
+
+options:
+  -h, --help            show this help message and exit
+  --address ADDRESS     BLE Device Address (overrides .env)
+  --info                Fetch device info and Wi-Fi SSID
+  --monitor             Start raw monitoring
+  --parse               Start parsing payload live
+  --discover            Discover GATT services and uuids
+  --light {OFF,1,2,3}   Set light level (OFF, 1, 2, 3)
+  --fan {OFF,1,2,3,BOOST,AUTO}
+                        Set fan speed
+
+```
+
 ## Disclaimer
 
 This is an unofficial project, not affiliated with Safera or RørosHetta. Use this code at your own risk—don't burn your dinner (or your fancy sensor).
