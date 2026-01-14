@@ -1,74 +1,127 @@
 from dataclasses import dataclass
 from enum import IntEnum
-import struct
+
+
+SENSOR_ERROR_FLAGS = {
+    0x0001: "Temp Sensor",
+    0x0002: "TOF Sensor",
+    0x0004: "ADC Sensor",
+    0x0008: "Gas Sensor A",
+    0x0010: "Gas Sensor B",
+    0x0020: "Particle Sensor",
+    0x0040: "Orientation Sensor",
+    0x0080: "Humidity Sensor",
+    0x0100: "Orientation",
+    0x0200: "Battery Low",
+    0x0400: "Paired PCU missing",
+    0x0800: "Processor Error",
+    0x1000: "Sensor Lens Dirty",
+    0x2000: "Battery Critically Low",
+    0x4000: "External Memory",
+    0x8000: "IO Expander",
+}
 
 
 @dataclass(frozen=True)
 class SaferaSensorData:
-    """Class to represent parsed Safera sensor data."""
+    ambient_temperature: float
+    surface_temperature: float
+    humidity: float
+    ambient_light: float
+    mounting_height: int
+    emf: int
+    air_quality_index: int
+    particle_index: float
+    voc_uba: float
+    co2_ppm: int
+    tvoc_ppb: int
+    miu_status: int
+    voc_status: int
+    heat_index: int
+    connected_accessories: int
+    battery_level: int
+    seconds_since_ok_press: int
+    alarm_status: int
+    tilt_angle: int
+    pitch_angle: int
+    device_state: int
+    sensor_errors: int
+    device_clock: int
+    pcu_errors: int
+    activity_type: int
+    alarm_level: int
+    activity_level: int
+    power_consumption: int
+    blec_command: int
+    pcu_lqi: int
+    pcu_ed: int
+    fan_speed_raw: int | None = None
+    fan_speed_level: int | None = None
+    fan_auto: bool | None = None
+    light_brightness_raw: int | None = None
+    light_level: int | None = None
+    light_auto: bool | None = None
 
-    # Fan & Light Control States
-    fan_level: int  # 0-4
-    fan_auto: bool
-    light_level: int  # 0-3
-    light_auto: bool
-
-    # Environmental Sensors
-    temp: float  # Celsius
-    humidity: float  # Percentage
-    co2: int  # ppm
-    pm25: int  # µg/m³
-    tvoc: int  # µg/m³
-    aqi: int  # Index
-    heat_index: float  # Celsius
-    activity: int  # Percentage
-    alarm_level: int  # Percentage
-
-    # Binary Flags
-    filter_greasy: bool
-    activity_detected: bool
+    @property
+    def error_messages(self) -> list[str]:
+        return [
+            msg for mask, msg in SENSOR_ERROR_FLAGS.items() if self.sensor_errors & mask
+        ]
 
     @classmethod
-    def from_bytes(cls, data: bytearray) -> "SaferaSensorData":
-        """Parse the 69-byte payload into this dataclass."""
-        # Fan Handling
-        # 0=OFF, 30=L1, 60=L2, 90=L3, 120=BOOST
-        fan_raw = data[60]
-        fan_level = fan_raw // 30 if fan_raw in (0, 30, 60, 90, 120) else 0
-        fan_auto = data[63] == 30
-
-        # Light Handling
-        # 0=OFF, 30=L1, 60=L2, 90=L3, 100=AUTO
-        light_raw = data[53]
-        light_auto = light_raw == 100
-        if light_raw in (0, 30, 60, 90):
-            light_level = light_raw // 30
-        else:
-            # If AUTO (100) or unknown, we don't strictly know the step from this byte alone
-            # defaulting to 0 or keeping previous state logic is up to caller
-            light_level = 0
-
-        # Environmental
-        # PM2.5 is guessed at offset 12 (filling gap between AQI at 10 and CO2 at 15)
-        # Temp byte 31 seems unsigned based on prev logic, but 'b' (signed) is safer for temp
-        temp_val = struct.unpack_from("b", data, 31)[0]
-
+    def from_bytes(cls, payload: bytes | bytearray) -> "SaferaSensorData":
+        if len(payload) < 54:
+            raise ValueError("Sensor payload must be 54 bytes.")
+        u16 = lambda offset: int.from_bytes(payload[offset : offset + 2], "little")
+        s16 = lambda offset: int.from_bytes(
+            payload[offset : offset + 2], "little", signed=True
+        )
         return cls(
-            temp=float(temp_val),
-            humidity=int.from_bytes(data[4:6], "little") / 100.0,
-            aqi=int.from_bytes(data[10:12], "little"),
-            pm25=int.from_bytes(data[12:14], "little"),  # Placeholder/Guessed offset
-            co2=int.from_bytes(data[15:17], "little"),
-            tvoc=int.from_bytes(data[17:19], "little"),
-            fan_level=fan_level,
-            fan_auto=fan_auto,
-            light_level=light_level,
-            light_auto=light_auto,
-            heat_index=int.from_bytes(data[33:35], "little") / 10.0,
-            activity=data[51],
-            alarm_level=data[62],
-            filter_greasy=False,  # Unknown byte
-            activity_detected=data[50] == 0x01,
+            ambient_temperature=(u16(0) * 0.01) - 50,
+            surface_temperature=(u16(2) * 0.01) - 50,
+            humidity=u16(4) / 100,
+            ambient_light=u16(6) / 32,
+            mounting_height=payload[8],
+            emf=payload[9],
+            air_quality_index=u16(10),
+            particle_index=u16(12) / 5,
+            voc_uba=payload[14] / 20,
+            co2_ppm=u16(15),
+            tvoc_ppb=u16(17),
+            miu_status=int.from_bytes(payload[19:23], "little"),
+            voc_status=payload[23],
+            heat_index=payload[24] * 2,
+            connected_accessories=payload[25],
+            battery_level=payload[26],
+            seconds_since_ok_press=payload[27],
+            alarm_status=payload[28],
+            tilt_angle=s16(29),
+            pitch_angle=s16(31),
+            device_state=payload[33],
+            sensor_errors=u16(34),
+            device_clock=int.from_bytes(payload[36:40], "little"),
+            pcu_errors=u16(40),
+            activity_type=payload[43],
+            alarm_level=payload[44],
+            activity_level=payload[45],
+            power_consumption=u16(46),
+            blec_command=payload[50],
+            pcu_lqi=int.from_bytes(payload[51:52], "little", signed=True),
+            pcu_ed=payload[52],
+            fan_speed_raw=payload[60] if len(payload) > 60 else None,
+            fan_speed_level=(
+                payload[60] // 30
+                if len(payload) > 60 and payload[60] in (0, 30, 60, 90, 120)
+                else None
+            ),
+            fan_auto=payload[63] == 30 if len(payload) > 63 else None,
+            light_brightness_raw=payload[53] if len(payload) > 53 else None,
+            light_level=(
+                payload[53] // 30
+                if len(payload) > 53 and payload[53] in (0, 30, 60, 90)
+                else None
+            ),
+            light_auto=(payload[53] == 100) if len(payload) > 53 else None,
         )
 
 

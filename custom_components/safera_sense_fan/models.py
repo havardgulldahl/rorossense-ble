@@ -1,1 +1,1 @@
-../../src/models.py
+/Users/Havard.Gulldahl/dev/rorossense/src/models.py
